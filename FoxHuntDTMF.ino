@@ -6,6 +6,10 @@
 //  based on Morse Code Converter By http://forum.singul4rity.com/thread-317.html
 //  extensively modified by Bruce Ratoff, KO4XL
 //  -------------------------------------------------------------
+// Modification history:
+//  - Replace Arduino bitwise functions with macros for smaller code
+//  - Replace numeric literal constants with #defines for better readability
+
 /*
  *  Instructions:
   *  Lost/found switch:
@@ -24,7 +28,7 @@
   *   6 - put fox in "lost" state and enable transmission (like 7 followed by 1)
   *   7 - put fox in "lost" state - sends back "L" - overrides the switch
   *   9 - Send Fox Lost/Found message right now if transmission is enabled
-  *   A - Read Vcc - sends back "VCC x.x"
+  *   A - Read Vcc - sends back "BV xx" - xx is tenths of a volt
   *   B - blink LED continuously when not transmitting
   *   D - toggles Tx LED on and off with PTT - sends back "ON" or "OF"
   *   Any other key will be echoed back in morse, followed by '?'
@@ -37,8 +41,9 @@
 #include <tinyDTMF.h>
 
 #include "pitches.h"
-#include "cwtable.h"
 #include "music.h"
+
+#include "cwtable.h"
 
 // Port manipulation macros save space by avoiding digitalRead and digitalWrite
 #define SetBit(p,b) {p |= 1<<b;}
@@ -74,9 +79,20 @@ const char QRT[] PROGMEM = "QRT";
 const char lowBatt[] PROGMEM = "LOW BATTERY";
 
 unsigned long pauseTime;  // Holds current long wait time (either huntPause or foundPause)
+
 char huntState;           // 1 = hunt active, 0 = fox found
+#define HUNT_ACTIVE 1
+#define FOX_FOUND 0
+
 char switchState;         // Last state of lost/found switch (1=lost, 0=found)
+#define SWITCH_LOST 1
+#define SWITCH_FOUND 0
+
 char foxEnabled;          // bit 0 set if fox is enabled to cycle, bit 1 set to tx once
+#define FOX_ENABLED 1
+#define FOX_TX_ONCE 2
+#define FOX_DISABLED 0
+
 #ifdef TXLed
 char ledEnabled = 0;      // nonzero if TX led is enabled
 char blinker = 0;         // nonzero to blink Tx LED while idle
@@ -99,12 +115,12 @@ void setup(){
     if(!ReadBit(PINB,foundPin)) {     // If switch was in "found" position at power up
       while(!ReadBit(PINB,foundPin))  // Wait until switch is in "lost" position
         sdelay(pauseTime);            // use long delay so that we still watch the DTMF
-      foxEnabled = 1;                 // Fox is enabled when switch goes to "lost"
+      foxEnabled = FOX_ENABLED;                 // Fox is enabled when switch goes to "lost"
     } else {
-      foxEnabled = 0;                 // If in "lost" at power-up, we start disabled
+      foxEnabled = FOX_DISABLED;                 // If in "lost" at power-up, we start disabled
     }
-    switchState = 1;
-    huntState = 1;
+    switchState = SWITCH_LOST;
+    huntState = HUNT_ACTIVE;
 }
 
 // Returns true when a DTMF key has been pressed and released
@@ -134,11 +150,9 @@ bool checkDTMF(void) {
 void pttDown(void) {
 #ifdef TXLed
     if(ledEnabled) 
-//      digitalWrite(TXLed,HIGH);  //Enable TX Led
       SetBit(PORTB, TXLed);
 #endif
     delay(1000);               //Always wait 1 sec first so commands can unkey
-//    digitalWrite(PTT,HIGH);    //Enable PTT
     SetBit(PORTB, PTT);
     sdelay(1000);               //Wait for Radio to TX
 }
@@ -146,11 +160,9 @@ void pttDown(void) {
 // Unkey the radio
 void pttUp(void) {
     sdelay(500);               //Wait for last element before unkeying
-//    digitalWrite(PTT,LOW);     //Disable PTT 
     ClearBit(PORTB, PTT);
 #ifdef TXLed
     if(ledEnabled) 
-//      digitalWrite(TXLed,LOW);   //Disable TX Led
       ClearBit(PORTB, TXLed);
 #endif
 }
@@ -271,33 +283,33 @@ bool processKey(void) {
   if(dtmfKey != 0) {        // if a DTMF key was captured
     switch(dtmfKey) {       // Choose function
       case '0':
-        foxEnabled = 0;     // Disable fox from repeating message
+        foxEnabled = FOX_DISABLED;     // Disable fox from repeating message
         pttDown();
         SendMorse(QRT);     // Acknowledge the disable
         pttUp();
         break;
       case '1':
-        foxEnabled = 1;     // Enable repeating transmission
+        foxEnabled = FOX_ENABLED;     // Enable repeating transmission
         txNow = true;
         break;
       case '4':
-        huntState = 0;              // set hunt state to found
+        huntState = FOX_FOUND;              // set hunt state to found
         pauseTime = foundPause;
         txNow = foxEnabled;         // If we're enabled, start transmission now
                                     // fall thru to 5 to send F for found state
       case '5':
         pttDown();                  // status - send back L or F for lost or found
-        if(huntState)
+        if(huntState == HUNT_ACTIVE)
           sendChar('L');
         else
           sendChar('F');
         pttUp();
         break;
       case '6':
-        foxEnabled = 1;             // hunt mode and enable in one command
+        foxEnabled = FOX_ENABLED;             // hunt mode and enable in one command
                                     // fall thru and let 7 do the rest
       case '7':
-        huntState = 1;               //   set hunt state to lost
+        huntState = HUNT_ACTIVE;               //   set hunt state to lost
         pauseTime = huntPause;
         pttDown();
         sendChar('L');              // Acknowledge lost command
@@ -306,7 +318,7 @@ bool processKey(void) {
         break;
       case '9':
         txNow = true;          // Send lost/found message once - retains enabled/disabled state
-        foxEnabled |= 2;
+        foxEnabled |= FOX_TX_ONCE;
         break;
       case 'A':
         pttDown();            // Measure and send Vcc
@@ -345,7 +357,7 @@ void sdelay(unsigned long ms) {
   unsigned long millis_then = millis() + ms;
   unsigned long millis_dtmf = millis();
   unsigned long millis_blink = millis();
-  char foundWas = 1;    // Last state of switch during debounce
+  char foundWas = SWITCH_LOST;    // Last state of switch during debounce
   char debounce = 0;    // Count since switch last changed
   char t;
 
@@ -363,7 +375,6 @@ void sdelay(unsigned long ms) {
         }
         millis_dtmf = millis() + 100;     // Don't check DTMF for another 100 ms
       }
-//      t = digitalRead(foundPin);  // Next read the found switch and debounce it
       t = ReadBit(PINB,foundPin);  // Next read the found switch and debounce it
       if(foundWas == t) {
         ++debounce;               // If it hasn't changed, increment counter
@@ -374,13 +385,13 @@ void sdelay(unsigned long ms) {
       if(debounce > 100) {        // If switch stayed stable for full debounce count
         if(switchState != foundWas) {   // If switch was actually changed by a user
           switchState = foundWas;
-          if((foundWas == 1) && (huntState == 0)) {     // If switch says lost and huntState says found
-            huntState = 1;                              //   set hunt state to lost
+          if((foundWas == 1) && (huntState == FOX_FOUND)) {     // If switch says lost and huntState says found
+            huntState = HUNT_ACTIVE;                              //   set hunt state to lost
             pauseTime = huntPause;
             break;
           }
-          if((foundWas == 0) && (huntState == 1)) {     // If switch says found and huntState says lost
-            huntState = 0;                              //   set hunt state to found
+          if((foundWas == 0) && (huntState == HUNT_ACTIVE)) {     // If switch says found and huntState says lost
+            huntState = FOX_FOUND;                              //   set hunt state to found
             pauseTime = foundPause;
             break;
           }
@@ -388,7 +399,6 @@ void sdelay(unsigned long ms) {
       }
 #ifdef TXLed
       if(blinker && (long)(millis()-millis_blink) > 0) {
-//        digitalWrite(TXLed, !digitalRead(TXLed));
         SetBit(PINB, TXLed);
         millis_blink = millis() + 250;
       }
@@ -398,10 +408,10 @@ void sdelay(unsigned long ms) {
 } // End sdelay();
 
 void loop(){
-  if(foxEnabled) {      // Any nonzero bits means send (b0 is enable, b1 is one-time send)
-    foxEnabled &= 1;    // Clear the one-time flag (bit 1)
+  if(foxEnabled != FOX_DISABLED) {      // Any non-silent mode
+    foxEnabled &= FOX_ENABLED;    // Keep only the enabled flag, not any temporaries
     pttDown();
-    if(huntState) {
+    if(huntState == HUNT_ACTIVE) {
       SendMorse(morseLost);
       sdelay(1000);           //Wait a sec before playing melody(s)
       playMelody(notes_Twinkle, melody_Twinkle, durations_Twinkle);           //Play Melody #1
@@ -418,7 +428,7 @@ void loop(){
       playMelody(notes_StarWars, melody_StarWars, durations_StarWars);
     }
     sdelay(1000);               //Wait 
-    if(huntState)
+    if(huntState == HUNT_ACTIVE)
       SendMorse(morseLost);
     else
       SendMorse(morseFound);
