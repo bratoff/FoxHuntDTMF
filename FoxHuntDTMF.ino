@@ -2,13 +2,12 @@
 //  TRANSMITTER LOGIC FOR HT-based foxhunt fox
 //  UPLOAD USING ATtiny85, 8MHz Internal NO BOD Core!!!!  (DigiSpark core is fine.)
 //  Aug 2021 - Accepts remote commands via DTMF - see below
-//  -------------------CREDITS-----------------------------------
-//  based on Morse Code Converter By http://forum.singul4rity.com/thread-317.html
-//  extensively modified by Bruce Ratoff, KO4XL
 //  -------------------------------------------------------------
 // Modification history:
 //  - Replace Arduino bitwise functions with macros for smaller code
 //  - Replace numeric literal constants with #defines for better readability
+//  - Compile-time option replaces music with a series of beeps (Nov 2024)
+//
 
 /*
  *  Instructions:
@@ -36,22 +35,26 @@
   *   NOTE:  0 and 1 only affect the "lost" and "found" messages.  The command responses are always enabled.
  */
 
+//#define MUSIC
+
 #include <avr/pgmspace.h>
 #include <avr/sleep.h>
 #include <tinyDTMF.h>
 
+#ifdef MUSIC
 #include "pitches.h"
 #include "music.h"
+#endif
 
 #include "cwtable.h"
 
 // Port manipulation macros save space by avoiding digitalRead and digitalWrite
-#define SetBit(p,b) {p |= 1<<b;}
-#define ClearBit(p,b) {p &= ~(1<<b);}
-#define ReadBit(p,b) ((p & (1<<b))>>b)
+#define SetBit(p,b) (p |= (1<<b))
+#define ClearBit(p,b) (p &= ~(1<<b))
+#define ReadBit(p,b) ((p & (1<<b)) != 0)
 
 // Pin assignments - leave TXLed undefined to disable TX light
-#define TXLed 1           // Define Led TX Indicator Pin
+#define TXLed LED_BUILTIN   // Define Led TX Indicator Pin
 #define tonePin 0           // Define Audio out Pin
 #define foundPin 2          // Ground this pin when fox is found
 #define PTT 4               // Define PTT Pin 
@@ -64,31 +67,33 @@
 #define transpose 1
 #define huntPause 180000UL
 #define foundPause 30000UL
+#define lostMsgTime 10000UL
 
 #define VREF 0x0c           // Pseudo-pin number for internal 1.1v reference
 #define MIN_BATT 40         // Minimum Vcc allowed in tenths of a volt
 #define REF_CONST 1125300UL   // Constant for voltage calculation = 1.1*1023*1000
 
 //Enter your callsign here
-const char callSign[] PROGMEM = "KO4XL/FOX";
+const char callSign[] PROGMEM = "KO4XL/F";
 
 //Morse Strings to be Sent - use dash to get extra time between characters
-const char morseLost[] PROGMEM = "FOXHUNT";
-const char morseFound[] PROGMEM = "FOUND THE FOX";
+const char morseLost[] PROGMEM = "LOST";
+const char morseFound[] PROGMEM = "FOUND";
 const char QRT[] PROGMEM = "QRT";
-const char lowBatt[] PROGMEM = "LOW BATTERY";
+const char QRV[] PROGMEM = "QRV";
+const char lowBatt[] PROGMEM = "LO BAT";
 
 unsigned long pauseTime;  // Holds current long wait time (either huntPause or foundPause)
 
-char huntState;           // 1 = hunt active, 0 = fox found
+uint8_t huntState;           // 1 = hunt active, 0 = fox found
 #define HUNT_ACTIVE 1
 #define FOX_FOUND 0
 
-char switchState;         // Last state of lost/found switch (1=lost, 0=found)
+uint8_t switchState;         // Last state of lost/found switch (1=lost, 0=found)
 #define SWITCH_LOST 1
 #define SWITCH_FOUND 0
 
-char foxEnabled;          // bit 0 set if fox is enabled to cycle, bit 1 set to tx once
+uint8_t foxEnabled;          // bit 0 set if fox is enabled to cycle, bit 1 set to tx once
 #define FOX_ENABLED 1
 #define FOX_TX_ONCE 2
 #define FOX_DISABLED 0
@@ -103,22 +108,24 @@ char dtmfKey = 0;         // Last DTMF key received
 char waitForSpace = 0;    // Nonzero if waiting for DTMF to stop
 
 void setup(){
+    DTMF.begin();
 #ifdef TXLed
     DDRB |= ((1<<TXLed) | (1<<tonePin) | (1<<PTT));
 #else
     DDRB |= ((1<<tonePin) | (1<<PTT));
 #endif
-    DDRB &= ~(1<<foundPin);
-    SetBit(PORTB, foundPin);
-    DTMF.begin();
-    pauseTime = huntPause;
-    if(!ReadBit(PINB,foundPin)) {     // If switch was in "found" position at power up
-      while(!ReadBit(PINB,foundPin))  // Wait until switch is in "lost" position
+    ClearBit(DDRB,foundPin);
+    SetBit(PORTB,foundPin);
+    pauseTime = 1000UL;
+    foxEnabled = FOX_DISABLED;
+    if(!ReadBit(PINB,foundPin)) {       // If switch was in "found" position at power up
+      switchState = SWITCH_FOUND;
+      while(!ReadBit(PINB,foundPin)) {     // Wait until switch is in "lost" position
         sdelay(pauseTime);            // use long delay so that we still watch the DTMF
-      foxEnabled = FOX_ENABLED;                 // Fox is enabled when switch goes to "lost"
-    } else {
-      foxEnabled = FOX_DISABLED;                 // If in "lost" at power-up, we start disabled
+      }
     }
+    foxEnabled = FOX_ENABLED;                 // Fox is enabled when switch goes to "lost"
+    pauseTime = huntPause;
     switchState = SWITCH_LOST;
     huntState = HUNT_ACTIVE;
 }
@@ -169,9 +176,10 @@ void pttUp(void) {
 
 //Send a cw string from PROGMEM
 void SendMorse(const char message[]) {
-  char i,j;
+  int i;
+  char j;
 
-  for(i=0; j=pgm_read_byte(&message[i]); i++) {
+  for(i=0; (j=pgm_read_byte(&message[i])); i++) {
     if(j > 'Z')
       j -= ' ';
     sendChar(j);
@@ -237,7 +245,7 @@ void sendElements(unsigned char ele) {
 void sendChar(const char c) {
   unsigned char k,m;
   
-  for(k=0; m=pgm_read_byte(&chtable[k]); k++) {
+  for(k=0; (m=pgm_read_byte(&chtable[k])); k++) {
     if(c == m)
       break;
   }
@@ -276,6 +284,22 @@ void sendVcc(void) {
   sendChar(v%10+'0');
 }
 
+// status - send L or F for lost or found
+void sendLF() {
+  pttDown();
+  if(huntState == HUNT_ACTIVE)
+    sendChar('L');
+  else
+    sendChar('F');
+  pttUp();
+}
+
+void setLost() {
+  huntState = HUNT_ACTIVE;               //   set hunt state to lost
+  pauseTime = huntPause;
+  sendLF();
+}
+
 // Take action if a DTMF key has been captured
 // Return true if command should break out of long delay
 bool processKey(void) {
@@ -296,25 +320,17 @@ bool processKey(void) {
         huntState = FOX_FOUND;              // set hunt state to found
         pauseTime = foundPause;
         txNow = foxEnabled;         // If we're enabled, start transmission now
-                                    // fall thru to 5 to send F for found state
+        sendLF();                   // and send status
+        break;
       case '5':
-        pttDown();                  // status - send back L or F for lost or found
-        if(huntState == HUNT_ACTIVE)
-          sendChar('L');
-        else
-          sendChar('F');
-        pttUp();
+        sendLF();                    // send current status
         break;
       case '6':
         foxEnabled = FOX_ENABLED;             // hunt mode and enable in one command
-                                    // fall thru and let 7 do the rest
+        setLost();
+        break;
       case '7':
-        huntState = HUNT_ACTIVE;               //   set hunt state to lost
-        pauseTime = huntPause;
-        pttDown();
-        sendChar('L');              // Acknowledge lost command
-        pttUp();
-        txNow = foxEnabled;         // If we're enabled, start transmission now
+        setLost();
         break;
       case '9':
         txNow = true;          // Send lost/found message once - retains enabled/disabled state
@@ -370,8 +386,9 @@ void sdelay(unsigned long ms) {
     if(ms == pauseTime) {
       if((long)(millis()-millis_dtmf) > 0) { // To save battery, only check DTMF every 100 ms
         if(checkDTMF()) {
-          if(processKey());                  // If we got a DTMF key process it
+          if(processKey()) {                  // If we got a DTMF key process it
             break;                           // Terminate delay if DTMF command requires it
+          }
         }
         millis_dtmf = millis() + 100;     // Don't check DTMF for another 100 ms
       }
@@ -413,19 +430,31 @@ void loop(){
     pttDown();
     if(huntState == HUNT_ACTIVE) {
       SendMorse(morseLost);
+#ifdef MUSIC
       sdelay(1000);           //Wait a sec before playing melody(s)
       playMelody(notes_Twinkle, melody_Twinkle, durations_Twinkle);           //Play Melody #1
+#endif
       sdelay(1000);           //Wait between melodies
       if(readVcc() > MIN_BATT) {
+#ifdef MUSIC
         playMelody(notes_Zelda, melody_Zelda, durations_Zelda);           //Play Melody #2
+#else
+        unsigned long stopMsgTime = millis() + lostMsgTime;
+        do {
+          dah();
+          sdelay(500);
+        } while((long)(millis()-stopMsgTime) < 0);
+#endif
       } else {
         SendMorse(lowBatt);     // if battery running low, replace melody #2 with warning
         sdelay(1000);
       }
     } else {
       SendMorse(morseFound);
+#ifdef MUSIC
       sdelay(1000);
       playMelody(notes_StarWars, melody_StarWars, durations_StarWars);
+#endif
     }
     sdelay(1000);               //Wait 
     if(huntState == HUNT_ACTIVE)
@@ -439,6 +468,7 @@ void loop(){
   sdelay(pauseTime);          //Wait to start over - meanwhile listen for commands
 }
 
+#ifdef MUSIC
 // Play a melody, given note count, list of pitches and list of durations
 void playMelody(const int numberOfNotes, const int melody[], const char noteDurations[]) {
     // iterate over the notes of the melody:
@@ -462,3 +492,4 @@ void playMelody(const int numberOfNotes, const int melody[], const char noteDura
         noTone(tonePin);
   }  
 }
+#endif
