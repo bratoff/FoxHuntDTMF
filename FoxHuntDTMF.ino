@@ -70,7 +70,7 @@
 #define lostMsgTime 10000UL
 
 #define VREF 0x0c           // Pseudo-pin number for internal 1.1v reference
-#define MIN_BATT 40         // Minimum Vcc allowed in tenths of a volt
+#define MIN_BATT 45         // Minimum Vcc allowed in tenths of a volt
 #define REF_CONST 1125300UL   // Constant for voltage calculation = 1.1*1023*1000
 
 //Enter your callsign here
@@ -446,7 +446,7 @@ void loop(){
         } while((long)(millis()-stopMsgTime) < 0);
 #endif
       } else {
-        SendMorse(lowBatt);     // if battery running low, replace melody #2 with warning
+        SendMorse(lowBatt);     // if battery running low, add warning to message
         sdelay(1000);
       }
     } else {
